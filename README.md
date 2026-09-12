@@ -134,7 +134,7 @@ luac5.4 -p Mods/MoreRVers/scripts/main.lua
 lua5.4 tools/session_test.lua
 ```
 
-The tests simulate UE4SS lifecycle callbacks, cap resets, travel to a session subclass, Windows config paths, read-only diagnostics, and failed property writes. They also assert game-thread object access. They do not run Unreal Engine, UE4SS's native hooks, or Steam networking. In-game verification with more than four players on build 1.3.20488 remains outstanding.
+The tests simulate UE4SS lifecycle callbacks, cap resets, travel to a session subclass, Windows config paths, read-only diagnostics, and failed property writes. They also assert game-thread object access. They do not run Unreal Engine, UE4SS's native hooks, or Steam networking. The host has also tested the patched mod in-game and confirmed that it works. The exact installed game build was not recorded.
 
 ## Troubleshooting
 
