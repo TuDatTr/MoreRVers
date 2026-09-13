@@ -20,6 +20,7 @@ local MoreRVers = {
     lastSweep    = nil, -- reason string of the last sweep
     triggers     = {},  -- trigger name -> true when installed
     seenProps    = {},  -- "Class.Prop" -> last value we observed
+    warnedWrites = {},  -- "Class.Prop" -> true once a failed write was reported
   },
 }
 
@@ -36,16 +37,27 @@ local ModDir = ScriptDir and (ScriptDir .. "../") or nil
 -- Config
 --------------------------------------------------------------------------------
 
--- Reads "Key = Value" lines, ignoring ';' and '#' comments. Returns a table
--- keyed by lowercased key name.
+-- Reads "Key = Value" lines, ignoring ';' and '#' comments, whole-line and
+-- trailing alike. Returns a table keyed by lowercased key name.
+--
+-- A UTF-8 BOM is stripped first: Notepad and most Windows editors write one by
+-- default, and without this the first key parses as "\239\187\191maxplayers"
+-- and the configured cap is silently ignored in favour of the default.
 local function parse_ini(filepath)
   local file = io.open(filepath, "r")
   if not file then return nil end
 
   local values = {}
+  local first = true
   for line in file:lines() do
-    line = line:match("^%s*(.-)%s*$")
-    if line ~= "" and not line:match("^[;#]") and not line:match("^%[") then
+    if first then
+      line = line:gsub("^\239\187\191", "")
+      first = false
+    end
+    -- Drop a trailing comment before trimming, so "MaxPlayers = 12 ; friends"
+    -- yields "12" rather than a string tonumber() cannot read.
+    line = line:gsub("[;#].*$", ""):match("^%s*(.-)%s*$")
+    if line ~= "" and not line:match("^%[") then
       local key, value = line:match("^([^=]-)%s*=%s*(.-)$")
       if key and key ~= "" then
         values[key:lower()] = value
@@ -197,6 +209,19 @@ local CDO_PATHS = {
   "/Script/Engine.Default__GameSession",
 }
 
+-- A failed write is the direct cause of "the cap stays at 4", so it is reported
+-- at WARN rather than DEBUG. Only the first failure per property is promoted;
+-- the periodic sweep would otherwise repeat it every few seconds.
+local function warn_write(label, prop, message)
+  local key = label .. "." .. prop
+  if MoreRVers.State.warnedWrites[key] then
+    MoreRVers.Debug(message)
+  else
+    MoreRVers.State.warnedWrites[key] = true
+    MoreRVers.Warn(message)
+  end
+end
+
 local function apply_to(obj, label, reason)
   if not is_valid(obj) then return 0 end
 
@@ -220,10 +245,11 @@ local function apply_to(obj, label, reason)
             MoreRVers.State.applied = MoreRVers.State.applied + 1
             MoreRVers.Log(string.format("%s.%s: %s -> %d (%s)", label, prop, tostring(cur), target, reason))
           else
-            MoreRVers.Debug(string.format("%s.%s write did not stick (still %s)", label, prop, tostring(now)))
+            warn_write(label, prop,
+              string.format("%s.%s write did not stick (still %s)", label, prop, tostring(now)))
           end
         else
-          MoreRVers.Debug(string.format("%s.%s is not writable", label, prop))
+          warn_write(label, prop, string.format("%s.%s is not writable", label, prop))
         end
       end
     end
