@@ -18,7 +18,7 @@ This mod patches the game's multiplayer cap at runtime, allowing you to host ses
 - **Host-Only Requirement** - Clients do not require mod installation
 - **Non-Destructive** - No permanent game file modifications
 - **Flexible Limits** - Configurable player count from 1-24
-- **Runtime Patching** - Applied immediately upon session creation
+- **Runtime Patching** - Applied after game initialization, map loading, and accepted-player Blueprint login events
 
 ## Installation
 
@@ -109,10 +109,10 @@ MaxPlayers = 8
 
 **Configuration Parameters:**
 - Default: 8 (vanilla game limit is 4)
-- Range: 1-24
+- Range: whole numbers from 1-24
 - Recommended: 8 for optimal stability
 
-The game must be restarted for configuration changes to take effect.
+The game must be restarted for configuration changes to take effect. A missing or invalid `MaxPlayers` value now stops the mod with an error in `UE4SS.log`; it does not silently substitute a different limit.
 
 ### Advanced options
 
@@ -138,10 +138,36 @@ The report goes to the UE4SS console and to `UE4SS.log`, which sits next to
 
 On a working install the log contains lines like:
 
-```
+```text
 [21:04:11] [MoreRVers] [INFO] MoreRVers v1.1.0 loading. Target cap=8 (hard max 24). Engine: UE 5.5
 [21:04:11] [MoreRVers] [INFO] BP_RideGameSession_C.MaxPlayers: 4 -> 8 (new GameSession)
 ```
+
+The loading line confirms only that the script started. The `4 -> 8` line is the
+value actually read back from the live session after the write. Neither proves
+that a fifth player successfully connected through Steam - test that separately
+in a new lobby.
+
+Diagnostics run on the game thread and do not change the values they report.
+
+### Local checks
+
+Run from the repository root with Lua 5.4:
+
+```sh
+luac5.4 -p Mods/MoreRVers/scripts/main.lua
+lua5.4 tools/ue4ss_stub_test.lua
+lua5.4 tools/session_test.lua
+```
+
+`ue4ss_stub_test.lua` is a smoke test over the whole sweep. `session_test.lua`
+is stricter: it models the UE4SS boundary rather than the mod's internals, and
+covers lifecycle callbacks, caps reset behind the mod's back, travel to a
+`GameSession` subclass with its own class default, Windows config paths, a BOM
+in `config.ini`, read-only diagnostics, and property writes that fail silently.
+It also asserts that every UObject access happens on the game thread.
+
+Neither suite runs Unreal Engine, UE4SS's native hooks, or Steam networking.
 
 ## Troubleshooting
 
@@ -185,9 +211,18 @@ Press `F10` and read the diagnostics report.
   look. Set `LogLevel = DEBUG`, reproduce, and open an issue with the log.
 - **The report lists a property still sitting at `4`** - the write is being
   rejected or the game is overwriting it. Attach the report to an issue.
+- **A fifth player is disconnected on join** - press `F10` immediately
+  afterwards, and include the full `UE4SS.log` plus the game log from that join
+  attempt in your report.
+- **The report shows the configured cap but joining still fails** - the cap is
+  set correctly and the cause lies in the game's admission or online session
+  handling, which this mod does not touch.
 - Sanity-check the mod is doing anything at all by setting `MaxPlayers = 1`. If
   you can no longer host anyone, the override works and the remaining limit is
   elsewhere.
+
+`WidgetComponent ... NOT Supported` warnings alone do not establish a capacity
+failure. This mod does not change widgets or suppress networking warnings.
 
 ### Game crashes or instability
 

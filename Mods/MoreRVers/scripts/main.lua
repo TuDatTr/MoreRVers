@@ -20,6 +20,7 @@ local MoreRVers = {
     lastSweep    = nil, -- reason string of the last sweep
     triggers     = {},  -- trigger name -> true when installed
     seenProps    = {},  -- "Class.Prop" -> last value we observed
+    warnedWrites = {},  -- "Class.Prop" -> true once a failed write was reported
   },
 }
 
@@ -36,16 +37,27 @@ local ModDir = ScriptDir and (ScriptDir .. "../") or nil
 -- Config
 --------------------------------------------------------------------------------
 
--- Reads "Key = Value" lines, ignoring ';' and '#' comments. Returns a table
--- keyed by lowercased key name.
+-- Reads "Key = Value" lines, ignoring ';' and '#' comments, whole-line and
+-- trailing alike. Returns a table keyed by lowercased key name.
+--
+-- A UTF-8 BOM is stripped first: Notepad and most Windows editors write one by
+-- default, and without this the first key parses as "\239\187\191maxplayers"
+-- and the configured cap is silently ignored in favour of the default.
 local function parse_ini(filepath)
   local file = io.open(filepath, "r")
   if not file then return nil end
 
   local values = {}
+  local first = true
   for line in file:lines() do
-    line = line:match("^%s*(.-)%s*$")
-    if line ~= "" and not line:match("^[;#]") and not line:match("^%[") then
+    if first then
+      line = line:gsub("^\239\187\191", "")
+      first = false
+    end
+    -- Drop a trailing comment before trimming, so "MaxPlayers = 12 ; friends"
+    -- yields "12" rather than a string tonumber() cannot read.
+    line = line:gsub("[;#].*$", ""):match("^%s*(.-)%s*$")
+    if line ~= "" and not line:match("^%[") then
       local key, value = line:match("^([^=]-)%s*=%s*(.-)$")
       if key and key ~= "" then
         values[key:lower()] = value
@@ -197,6 +209,19 @@ local CDO_PATHS = {
   "/Script/Engine.Default__GameSession",
 }
 
+-- A failed write is the direct cause of "the cap stays at 4", so it is reported
+-- at WARN rather than DEBUG. Only the first failure per property is promoted;
+-- the periodic sweep would otherwise repeat it every few seconds.
+local function warn_write(label, prop, message)
+  local key = label .. "." .. prop
+  if MoreRVers.State.warnedWrites[key] then
+    MoreRVers.Debug(message)
+  else
+    MoreRVers.State.warnedWrites[key] = true
+    MoreRVers.Warn(message)
+  end
+end
+
 local function apply_to(obj, label, reason)
   if not is_valid(obj) then return 0 end
 
@@ -220,10 +245,11 @@ local function apply_to(obj, label, reason)
             MoreRVers.State.applied = MoreRVers.State.applied + 1
             MoreRVers.Log(string.format("%s.%s: %s -> %d (%s)", label, prop, tostring(cur), target, reason))
           else
-            MoreRVers.Debug(string.format("%s.%s write did not stick (still %s)", label, prop, tostring(now)))
+            warn_write(label, prop,
+              string.format("%s.%s write did not stick (still %s)", label, prop, tostring(now)))
           end
         else
-          MoreRVers.Debug(string.format("%s.%s is not writable", label, prop))
+          warn_write(label, prop, string.format("%s.%s is not writable", label, prop))
         end
       end
     end
@@ -232,10 +258,29 @@ local function apply_to(obj, label, reason)
   return changed
 end
 
+-- UE4SS exposes the class default object as GetCDO(). GetDefaultObject() is the
+-- C++ spelling and is NOT part of the Lua API, so calling it fails silently
+-- inside the pcall and the class default is never patched. Both names are tried
+-- so this keeps working if a build ever exposes only the other one.
+local function class_default_of_class(cls)
+  if cls == nil then return nil end
+  for _, accessor in ipairs({ "GetCDO", "GetDefaultObject" }) do
+    local cdo = nil
+    local ok = pcall(function() cdo = cls[accessor](cls) end)
+    if ok and is_valid(cdo) then return cdo end
+  end
+  return nil
+end
+
+local function class_default_of(obj)
+  local cls = nil
+  if not pcall(function() cls = obj:GetClass() end) then return nil end
+  return class_default_of_class(cls)
+end
+
 local function apply_to_cdo_of(obj, label, reason)
-  local cdo = nil
-  local ok = pcall(function() cdo = obj:GetClass():GetDefaultObject() end)
-  if ok and is_valid(cdo) then
+  local cdo = class_default_of(obj)
+  if cdo then
     return apply_to(cdo, label .. " [CDO]", reason)
   end
   return 0
@@ -362,7 +407,11 @@ local function install_triggers()
     end
     if GSClass then
       -- Confirm IsA works before installing, so we never pay for a per-spawn error.
-      local probe = pcall(function() return GSClass:GetDefaultObject():IsA(GSClass) end)
+      local probe = false
+      local GSDefault = class_default_of_class(GSClass)
+      if GSDefault then
+        probe = pcall(function() return GSDefault:IsA(GSClass) end)
+      end
       if probe then
         local ok = pcall(RegisterBeginPlayPostHook, function(ContextParam)
           local okCtx, ctx = pcall(function() return ContextParam:get() end)
