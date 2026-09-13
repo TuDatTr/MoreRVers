@@ -51,11 +51,17 @@ local function fixture(config)
             end,
             GetClass = function()
                 game_thread()
-                return {
+                -- UE4SS names this GetCDO. GetDefaultObject is the C++ spelling
+                -- and is deliberately absent, so a mod calling it is caught here
+                -- rather than failing silently inside a pcall at runtime.
+                local cls = {
                     __session_class = class_name:find("GameSession") ~= nil,
                     GetFName = function() return {ToString = function() return class_name end} end,
-                    GetDefaultObject = function() game_thread(); return cdo or object end,
                 }
+                cls[f.cdo_accessor or "GetCDO"] = function()
+                    game_thread(); return cdo or object
+                end
+                return cls
             end,
         }
         setmetatable(object, {
@@ -103,11 +109,14 @@ local function fixture(config)
         game_thread()
         if path == "/Script/Engine.Default__GameSession" then return f.engine_cdo end
         if path == "/Script/Engine.GameSession" then
-            return {
+            local cls = {
                 __session_class = true,
                 IsValid = function() return true end,
-                GetDefaultObject = function() return f.engine_cdo end,
             }
+            cls[f.cdo_accessor or "GetCDO"] = function()
+                game_thread(); return f.engine_cdo
+            end
+            return cls
         end
         return nil
     end
@@ -219,6 +228,17 @@ f.registry.GameSession = {next_session}
 f.call(f.hooks.map)
 check(next_session.__values.MaxPlayers == 8, "travel must patch the new session instance")
 check(subclass_cdo.__values.MaxPlayers == 8, "travel must patch the exact subclass default, not just the engine one")
+
+-- A UE4SS build that exposes only the C++ spelling must still work.
+local legacy = fixture()
+legacy.cdo_accessor = "GetDefaultObject"
+local legacy_cdo = legacy.session("Default__BP_LegacyGameSession_C", 4)
+local legacy_session = legacy.session("BP_LegacyGameSession_C", 4, legacy_cdo)
+legacy.registry = {GameSession = {legacy_session}, GameModeBase = {}, GameStateBase = {}}
+legacy.load()
+legacy.flush()
+check(legacy_cdo.__values.MaxPlayers == 8,
+    "a build exposing only GetDefaultObject must still have its class default patched")
 
 -- BeginPlay of a spawned actor: only GameSessions are touched.
 next_session.__values.MaxPlayers = 4

@@ -258,10 +258,29 @@ local function apply_to(obj, label, reason)
   return changed
 end
 
+-- UE4SS exposes the class default object as GetCDO(). GetDefaultObject() is the
+-- C++ spelling and is NOT part of the Lua API, so calling it fails silently
+-- inside the pcall and the class default is never patched. Both names are tried
+-- so this keeps working if a build ever exposes only the other one.
+local function class_default_of_class(cls)
+  if cls == nil then return nil end
+  for _, accessor in ipairs({ "GetCDO", "GetDefaultObject" }) do
+    local cdo = nil
+    local ok = pcall(function() cdo = cls[accessor](cls) end)
+    if ok and is_valid(cdo) then return cdo end
+  end
+  return nil
+end
+
+local function class_default_of(obj)
+  local cls = nil
+  if not pcall(function() cls = obj:GetClass() end) then return nil end
+  return class_default_of_class(cls)
+end
+
 local function apply_to_cdo_of(obj, label, reason)
-  local cdo = nil
-  local ok = pcall(function() cdo = obj:GetClass():GetDefaultObject() end)
-  if ok and is_valid(cdo) then
+  local cdo = class_default_of(obj)
+  if cdo then
     return apply_to(cdo, label .. " [CDO]", reason)
   end
   return 0
@@ -388,7 +407,11 @@ local function install_triggers()
     end
     if GSClass then
       -- Confirm IsA works before installing, so we never pay for a per-spawn error.
-      local probe = pcall(function() return GSClass:GetDefaultObject():IsA(GSClass) end)
+      local probe = false
+      local GSDefault = class_default_of_class(GSClass)
+      if GSDefault then
+        probe = pcall(function() return GSDefault:IsA(GSClass) end)
+      end
       if probe then
         local ok = pcall(RegisterBeginPlayPostHook, function(ContextParam)
           local okCtx, ctx = pcall(function() return ContextParam:get() end)
